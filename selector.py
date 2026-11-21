@@ -27,6 +27,12 @@ POOL_RULE = False
 # line can also fail test files at collection time (which per-test coverage cannot attribute).
 CENTRAL_FRACTION = 0.8
 WORKER_COST_MS = 2000  # SCORING.md: every non-empty worker adds 2 s
+# Operand-observation profile (tools/isprof/, MILESTONE8.md): a baseline execution artifact recorded from the
+# PINNED commit only. For each `a is b` / `a is not b` site it stores the tests in which every observed operand
+# pair was of a type with builtin equality AND identity agreed with equality. It lets a patch that merely
+# swaps `is`->`==` (or `is not`->`!=`) at such a site skip the tests for which the swap is unobservable.
+# Missing/invalid/stale profile => coverage-only selection (the Milestone 7 behaviour).
+PROFILE_PATH = Path(__file__).with_name("isprof_profile.json.gz")
 
 # Paths that cannot influence a test run (docs, packaging metadata, benchmarks...).
 INERT_PREFIXES = ("posts/", "pdoc/", "benchmarks/", "sqlglot-integration-tests/",
@@ -172,7 +178,7 @@ def parse_patch(text: str) -> list[dict] | None:
 
 # --------------------------------------------------------------------------- the map
 class Selector:
-    def __init__(self, tests: list[dict], map_path: Path = MAP_PATH):
+    def __init__(self, tests: list[dict], map_path: Path = MAP_PATH, profile_path: Path | None = PROFILE_PATH):
         with gzip.open(map_path, "rt", encoding="utf-8") as f:
             m = json.load(f)
         self.map = m
@@ -196,6 +202,75 @@ class Selector:
             self.proc_bits |= 1 << i
         self.all_bits = (1 << len(m["tests"])) - 1
         self.all_numbers = [t["number"] for t in tests]
+        self._profile_path = profile_path
+        self._profile = None          # lazily loaded; {} = disabled
+
+    # -- operand-observation profile (fail closed: any doubt => no narrowing)
+    def _load_profile(self) -> dict:
+        if self._profile is not None:
+            return self._profile
+        self._profile = {}
+        if self._profile_path is None:
+            return self._profile
+        try:
+            import hashlib
+            with gzip.open(self._profile_path, "rt", encoding="utf-8") as fh:
+                p = json.load(fh)
+            if p.get("version") != 1:
+                return self._profile
+            if p.get("tests_sha") != hashlib.sha1(json.dumps(self.map["tests"]).encode()).hexdigest():
+                return self._profile      # profile was not built against this map's test order
+            self._profile = {"sets": [int(h, 16) for h in p["sets"]], "sites": p["sites"]}
+        except Exception:
+            self._profile = {}
+        return self._profile
+
+    @staticmethod
+    def _identity_swap_kind(old: str, new: str) -> str | None:
+        """'is' / 'is not' iff `new` is `old` with exactly one `is`->`==` / `is not`->`!=` token swap and `old`
+        holds exactly one `is` operator; otherwise None."""
+        import io
+        import tokenize
+        skip = (tokenize.NEWLINE, tokenize.NL, tokenize.ENDMARKER, tokenize.INDENT, tokenize.DEDENT)
+        try:
+            a = [t.string for t in tokenize.generate_tokens(io.StringIO(old.strip() + "\n").readline)
+                 if t.type not in skip]
+            b = [t.string for t in tokenize.generate_tokens(io.StringIO(new.strip() + "\n").readline)
+                 if t.type not in skip]
+        except (tokenize.TokenError, IndentationError, SyntaxError):
+            return None
+        if a.count("is") != 1:
+            return None
+        i = a.index("is")
+        if i + 1 < len(a) and a[i + 1] == "not":
+            return "is not" if a[:i] + ["!="] + a[i + 2:] == b else None
+        return "is" if a[:i] + ["=="] + a[i + 1:] == b else None
+
+    def _identity_swap_bits(self, f: dict, ent: dict) -> int | None:
+        """Narrowed test bits when EVERY changed block of this file is a pure identity<->equality swap at a
+        profiled site; None (= keep the coverage bits) in every other case."""
+        if f["status"] != "modified" or f["old"] != f["new"] or not f["old"].startswith("sqlglot/"):
+            return None
+        if not f["blocks"]:
+            return None
+        prof = self._load_profile()
+        if not prof:
+            return None
+        narrowed = 0
+        for _before, removed, added in f["blocks"]:
+            if len(removed) != 1 or len(added) != 1:
+                return None
+            lineno, old = removed[0]
+            if not 1 <= lineno <= ent["n"]:
+                return None
+            kind = self._identity_swap_kind(old, added[0])
+            if kind is None:
+                return None
+            k = prof["sites"].get(f'{f["old"]}:{lineno}:{lineno}:0:{kind}')
+            if k is None:
+                return None
+            narrowed |= self.sets[ent["l2s"][lineno]] & ~prof["sets"][k]
+        return narrowed
 
     # -- helpers
     def numbers(self, bits: int) -> set[int]:
@@ -263,6 +338,9 @@ class Selector:
                 if not 0 <= p <= n:
                     return None
                 bits |= self.sets[ent["ins"][p]]
+        nb = self._identity_swap_bits(f, ent)
+        if nb is not None:
+            bits = nb
         return bits, code
 
     def select(self, text: str) -> tuple[set[int] | None, str]:

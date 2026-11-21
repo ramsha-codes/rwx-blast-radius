@@ -59,3 +59,10 @@ the flawed first harness (kept, not deleted).
   (same other arguments as in the M3 section above).
 * Diagnostics: `python tools/breakdown.py` (per-commit cost), `python tools/mutation_costs.py` (selection stats on all generated mutations).
 * New official submission recommended? **No** for this change alone (about 3 % gain).
+
+## Milestone 8 addendum (branch `milestone-8-isprof`)
+* Based on M7 `d6a38b9` (sqlglotc fix, preserved). Adds `isprof_profile.json.gz`, an operand-observation profile
+  that lets pure `is`->`==` / `is not`->`!=` edits skip tests for which the swap is unobservable. Local sample
+  **135.300 s, 0 misses** (was 185.541). 0 false negatives on 50 held-out mutants (5 834 excluded tests run). See
+  `MILESTONE8.md`. Revert to M7 behaviour: delete `isprof_profile.json.gz` (selector fails closed) or checkout `d6a38b9`.
+* Dockerfile now also copies the profile. Nothing pushed or submitted; needs owner approval.
