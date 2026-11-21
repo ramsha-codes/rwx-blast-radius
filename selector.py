@@ -18,6 +18,14 @@ from pathlib import Path
 DATA = Path("/data")
 MAP_PATH = Path(__file__).with_name("selector_map.json.gz")
 MAX_WORKERS = 8
+# Tests that fan out to spawned ProcessPoolExecutor children used to be always-run (Milestone 2)
+# because coverage could not see the children. The Milestone 3 map traces the children, so the
+# blanket rule is off; flip this to True for a conservative build.
+POOL_RULE = False
+# Uncertainty-aware fallback: if the changed code is executed by at least this fraction of the
+# suite, run everything. Such a set is almost the whole suite anyway, and breaking a very central
+# line can also fail test files at collection time (which per-test coverage cannot attribute).
+CENTRAL_FRACTION = 0.8
 WORKER_COST_MS = 2000  # SCORING.md: every non-empty worker adds 2 s
 
 # Paths that cannot influence a test run (docs, packaging metadata, benchmarks...).
@@ -174,8 +182,14 @@ class Selector:
         for i in m["unmapped_tests"]:
             self.unmapped_bits |= 1 << i
         self.pool_bits = 0
-        for i in m.get("pool_tests", []):
-            self.pool_bits |= 1 << i
+        if POOL_RULE:
+            for i in m.get("pool_tests", []):
+                self.pool_bits |= 1 << i
+        # tests that start a fresh interpreter (subprocess): coverage cannot attribute that
+        # process to the test, so they run whenever production code changed (they are cheap)
+        self.proc_bits = 0
+        for i in m.get("proc_tests", []):
+            self.proc_bits |= 1 << i
         self.all_bits = (1 << len(m["tests"])) - 1
         self.all_numbers = [t["number"] for t in tests]
 
@@ -275,11 +289,13 @@ class Selector:
                     prod_code = True
                 continue
             return None, "other-file"
+        if bin(bits).count("1") >= CENTRAL_FRACTION * len(self.map["tests"]):
+            return None, "central"
         numbers = self.numbers(bits)
         if prod_code:
             # Tests that farm work out to spawned ProcessPoolExecutor children are invisible to
             # line coverage: always run them when production code changed.
-            numbers |= self.numbers(self.pool_bits)
+            numbers |= self.numbers(self.pool_bits) | self.numbers(self.proc_bits)
         if bits:
             numbers |= self.numbers(self.unmapped_bits) | set(self.extra_always)
         return numbers, "map"

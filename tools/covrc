@@ -1,0 +1,5 @@
+[run]
+parallel = True
+sigterm = True
+data_file = /work/cov/.coverage
+source = sqlglot,tests

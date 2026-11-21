@@ -28,6 +28,8 @@ ap.add_argument("--cov", required=True)
 ap.add_argument("--raw", required=True)
 ap.add_argument("--tests", required=True)
 ap.add_argument("--out", required=True)
+ap.add_argument("--cov-patch", help="second .coverage whose test contexts REPLACE those of --cov")
+ap.add_argument("--raw-patch", help="second plugin dump dir whose tests REPLACE those of --raw")
 a = ap.parse_args()
 
 tests = json.load(open(a.tests, encoding="utf-8"))["tests"]
@@ -36,35 +38,66 @@ idx = {t: i for i, t in enumerate(ids)}
 ALL = (1 << len(ids)) - 1
 
 # ---- coverage: file -> line -> bitset of tests ---------------------------------------
-db = sqlite3.connect(a.cov)
-files = {i: p for i, p in db.execute("select id, path from file")}
-ctxs = {i: c for i, c in db.execute("select id, context from context")}
 repo = os.path.abspath(a.repo).replace("\\", "/")
 cov = {}
 unmatched = set()
-for fid, cid, nb in db.execute("select file_id, context_id, numbits from line_bits"):
-    p = files[fid].replace("\\", "/")
-    if p.startswith(repo + "/"):
-        rel = p[len(repo) + 1:]
-    elif p.startswith("/work/sqlglot/"):
-        rel = p[len("/work/sqlglot/"):]
-    else:
-        continue
-    ctx = ctxs[cid].split("|")[0]
-    if not ctx:
-        continue                     # import time / collection: not attributable to one test
-    ti = idx.get(ctx)
-    if ti is None:
-        unmatched.add(ctx)
-        continue
-    bits = int.from_bytes(nb, "little")
-    d = cov.setdefault(rel, {})
-    ln = 0
-    while bits:
-        if bits & 1:
-            d[ln] = d.get(ln, 0) | (1 << ti)
-        bits >>= 1
-        ln += 1
+
+
+def load_cov(path, skip_tests=frozenset(), only_tests=None):
+    db = sqlite3.connect(path)
+    files = {i: p for i, p in db.execute("select id, path from file")}
+    ctxs = {i: c for i, c in db.execute("select id, context from context")}
+    seen = set()
+    for fid, cid, nb in db.execute("select file_id, context_id, numbits from line_bits"):
+        p = files[fid].replace("\\", "/")
+        if p.startswith(repo + "/"):
+            rel = p[len(repo) + 1:]
+        elif p.startswith("/work/sqlglot/"):
+            rel = p[len("/work/sqlglot/"):]
+        else:
+            continue
+        ctx = ctxs[cid].split("|")[0]
+        if not ctx:
+            continue                 # import time outside any module's collection
+        if ctx.startswith("collect:"):
+            tmask = file_tests.get(ctx[len("collect:"):].split("::")[0], 0)
+            if not tmask:
+                unmatched.add(ctx)
+                continue
+            if tmask & skip_mask:
+                continue
+        else:
+            ti = idx.get(ctx)
+            if ti is None:
+                unmatched.add(ctx)
+                continue
+            if ti in skip_tests:
+                continue
+            seen.add(ti)
+            tmask = 1 << ti
+        bits = int.from_bytes(nb, "little")
+        d = cov.setdefault(rel, {})
+        ln = 0
+        while bits:
+            if bits & 1:
+                d[ln] = d.get(ln, 0) | tmask
+            bits >>= 1
+            ln += 1
+    return seen
+
+
+file_tests = {}
+for _i, _t in enumerate(tests):
+    file_tests[_t["file"]] = file_tests.get(_t["file"], 0) | (1 << _i)
+skip_mask = 0
+patch_tests = frozenset()
+if a.cov_patch:   # contexts present in the patch DB replace the main DB's contexts
+    _pdb = sqlite3.connect(a.cov_patch)
+    patch_tests = frozenset(idx[c.split("|")[0]] for (c,) in _pdb.execute("select context from context")
+                            if c and c.split("|")[0] in idx)
+load_cov(a.cov, skip_tests=patch_tests)
+if a.cov_patch:
+    load_cov(a.cov_patch)
 
 
 def group_of(t):
@@ -79,8 +112,15 @@ for i, t in enumerate(ids):
     group[group_of(t)] = group.get(group_of(t), 0) | (1 << i)
 untracked = set()
 seen_tests = set()
-for fn in glob.glob(os.path.join(a.raw, "*.json")):
+raw_files = glob.glob(os.path.join(a.raw, "*.json"))
+patch_ids = set(ids[i] for i in patch_tests)
+patch_raw = glob.glob(os.path.join(a.raw_patch, "*.json")) if a.raw_patch else []
+for fn in raw_files + patch_raw:
+    from_patch = fn in patch_raw
     raw = json.load(open(fn))
+    if not from_patch and patch_ids:
+        raw["mods"] = {k: v for k, v in raw["mods"].items() if k not in patch_ids}
+        raw["opens"] = {k: v for k, v in raw["opens"].items() if k not in patch_ids}
     untracked |= set(raw["untracked_opens"])
     for nid, ms in raw["mods"].items():
         if nid in idx:
@@ -283,13 +323,19 @@ for dd in cov.values():
 # Coverage cannot see work done in spawned child processes, so these tests cannot be mapped
 # by line coverage. Found statically: test methods that reach `<x>.pool` / ProcessPoolExecutor
 # directly or through helper methods of the same class (e.g. check_file).
-def find_pool_tests():
+def find_pool_tests(kind="pool"):
     def uses(node):
         for x in ast.walk(node):
-            if isinstance(x, ast.Attribute) and x.attr == "pool":
-                return True
-            if isinstance(x, ast.Name) and x.id == "ProcessPoolExecutor":
-                return True
+            if kind == "pool":
+                if isinstance(x, ast.Attribute) and x.attr == "pool":
+                    return True
+                if isinstance(x, ast.Name) and x.id == "ProcessPoolExecutor":
+                    return True
+            else:   # tests that spawn an interpreter: subprocess.run/Popen/..., os.system
+                if isinstance(x, ast.Name) and x.id == "subprocess":
+                    return True
+                if isinstance(x, ast.Attribute) and x.attr == "system" and                         isinstance(x.value, ast.Name) and x.value.id == "os":
+                    return True
         return False
 
     def calls(node):
@@ -310,7 +356,9 @@ def find_pool_tests():
                 continue
             full = os.path.join(dp, fn)
             src = open(full, encoding="utf-8").read()
-            if "ProcessPoolExecutor" not in src and "pool" not in src:
+            if kind == "pool" and "ProcessPoolExecutor" not in src and "pool" not in src:
+                continue
+            if kind != "pool" and "subprocess" not in src and "os.system" not in src:
                 continue
             rel = os.path.relpath(full, a.repo).replace(os.sep, "/")
             tree = ast.parse(src)
@@ -333,7 +381,8 @@ def find_pool_tests():
     return sorted(found)
 
 
-pool_tests = find_pool_tests()
+pool_tests = find_pool_tests("pool")
+proc_tests = find_pool_tests("proc")
 
 result = {
     "version": 1,
@@ -343,6 +392,7 @@ result = {
     "files": out_files,
     "fixtures": fixtures,
     "pool_tests": pool_tests,
+    "proc_tests": proc_tests,
     "unmapped_tests": [i for i in range(len(ids)) if not (covered >> i) & 1],
 }
 with gzip.open(a.out, "wt", encoding="utf-8", compresslevel=9) as f:
@@ -354,3 +404,4 @@ for u in sorted(unmatched)[:10]:
     print("  unmatched:", u)
 print("pool-dependent tests:", len(pool_tests),
       "recorded seconds:", round(sum(tests[i]["seconds"] for i in pool_tests), 3))
+print("subprocess-dependent tests:", [ids[i] for i in proc_tests])

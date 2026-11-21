@@ -64,7 +64,14 @@ def _wrap_init(cls):
     cls.__init__ = init
 
 
-def pytest_sessionstart(session):
+_installed = False
+
+
+def _install():
+    global _installed
+    if _installed:
+        return
+    _installed = True
     import sqlglot.expressions.core as core
     from sqlglot.dialects.dialect import Dialect
     from sqlglot.generator import Generator
@@ -81,6 +88,59 @@ def pytest_sessionstart(session):
     Dialect.get_or_raise = classmethod(goe)
 
 
+def pytest_sessionstart(session):
+    _install()
+    _patch_pool()
+
+
+def _run_task(name, fn, args, kwargs):
+    """Runs inside a spawned pool child: attribute coverage/class use to the submitting test."""
+    _install()
+    _child_setup()
+    cur["id"] = name
+    _switch(name + "|run")
+    try:
+        import pickle
+        try:   # arguments were pickled by the parent / unpickled before we got here: redo it
+            pickle.loads(pickle.dumps((args, kwargs)))   # inside this test's coverage context
+        except Exception:
+            pass
+        res = fn(*args, **kwargs)
+        try:   # the result is pickled by this child and unpickled by the parent's reader thread
+            pickle.loads(pickle.dumps(res))
+        except Exception:
+            pass
+        return res
+    finally:
+        cur["id"] = None
+        _switch("")
+
+
+_child_ready = False
+
+
+def _child_setup():
+    global _child_ready
+    if _child_ready:
+        return
+    _child_ready = True
+    import atexit
+    atexit.register(_dump)
+
+
+def _patch_pool():
+    """ProcessPoolExecutor children are separate processes; tag each task with the test that
+    submitted it so the child's coverage data lands in that test's context."""
+    import concurrent.futures as cf
+    orig = cf.ProcessPoolExecutor.submit
+
+    def submit(self, fn, /, *args, **kwargs):
+        if cur["id"] is None:
+            return orig(self, fn, *args, **kwargs)
+        return orig(self, _run_task, cur["id"], fn, args, kwargs)
+    cf.ProcessPoolExecutor.submit = submit
+
+
 def _switch(name):
     # pytest 9 subtests reset pytest-cov's context to "", losing everything after the
     # first subtest. We therefore manage coverage contexts ourselves.
@@ -91,6 +151,18 @@ def _switch(name):
             c.switch_context(name)
     except Exception:
         pass
+
+
+def pytest_collectstart(collector):
+    # Code executed while a test MODULE is imported/collected (module and class bodies, parametrize
+    # data...) belongs to every test in that module: if it breaks, the whole file errors out.
+    if collector.nodeid.endswith(".py"):
+        _switch("collect:" + collector.nodeid + "|run")
+
+
+def pytest_collectreport(report):
+    if report.nodeid.endswith(".py"):
+        _switch("")
 
 
 def pytest_runtest_logstart(nodeid, location):
@@ -117,6 +189,10 @@ def pytest_runtest_logfinish(nodeid, location):
 
 
 def pytest_sessionfinish(session, exitstatus):
+    _dump()
+
+
+def _dump():
     os.makedirs(RAW, exist_ok=True)
     out = {
         "opens": {k: {p: sorted(v) for p, v in d.items()} for k, d in opens.items()},

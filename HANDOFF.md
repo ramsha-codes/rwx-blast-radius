@@ -1,0 +1,45 @@
+# HANDOFF (Milestone 3)
+
+* Branch: `milestone-3-research` (created from `578acca`). `main` and `origin/main` untouched; nothing pushed.
+* Best verified local score: **191.773 s, 0 missed commits** (Docker, official flags, as `nobody`,
+  one JSON line per commit, 0.22 s CPU, 31.5 MB RSS). Milestone 2 (main): 458.703 s local, 621.7 s official practice.
+* Validation done: sample scorer in container; output format check (`tools/check_output.py`); 4/70
+  mutations evaluated (0 misses). **Not done:** the other 66 mutations (stopped by OS memory guard).
+* Active processes: none of mine. Before finishing I stopped my own coverage/mutation containers
+  (`docker ps` shows only unrelated Supabase containers). Local image tags created: `rwx-cov-local`
+  (pip deps + coverage, for map building), `blast-m3`, `blast-verify`, `blast-radius-entry`.
+* New official submission recommended? **Not yet.** Use this branch as a *practice* submission only
+  if you want held-out evidence, or finish the mutation run first. Keep `578acca` as the fallback.
+
+## Reproduce
+
+```sh
+# sample score of the candidate (no Docker)
+python tools/evaluate.py                    # selection + official score.py on sample/
+python tools/evaluate_modes.py              # file-level / hybrid comparisons
+
+# official-style container run
+S="$(pwd -W)/sample"
+docker build --platform linux/amd64 -t blast-m3 .
+docker run --rm --platform linux/amd64 --network none --cpus 2 --memory 4096m --memory-swap 4096m \
+  --pids-limit 256 --read-only --tmpfs /tmp:rw,size=64m,mode=1777 --cap-drop ALL \
+  --security-opt no-new-privileges --user 65534:65534 --env HOME=/tmp \
+  --volume "$S/commits:/data/commits:ro" --volume "$S/tests.json:/data/tests.json:ro" blast-m3 > out.jsonl
+python score.py sample sample/answers.json out.jsonl && python tools/check_output.py out.jsonl sample/commits
+
+# rebuild the map (needs work/sqlglot = pinned checkout; heavy: ~10-12 min, ~2-3 GB RAM)
+git clone https://github.com/tobymao/sqlglot.git work/sqlglot && git -C work/sqlglot checkout eb11aec4be8cb2122afe713a4816662c3f0fb2fa
+docker build -q -t rwx-cov-local work/covimg (copy tools/covimg.Dockerfile + requirements.lock there)      # work/covimg/Dockerfile: labeling image + coverage
+docker run --rm -v "$PWD/work:/work" -v "$PWD/tools:/tools:ro" -e RAWDIR=raw_full2 -e COVOUT=covout_full2 \
+  rwx-cov-local sh /tools/run_coverage2.sh 3 tests
+python tools/build_map.py --repo work/sqlglot --cov work/covout_full2/.coverage --raw work/raw_full2 \
+  --tests sample/tests.json --out selector_map.json.gz
+
+# mutation validation (heavy; run only with >3 GB free RAM; resumable; ~1-2 min per mutation)
+python tools/mutate.py --repo work/sqlglot --out work/mutations --n 70 --seed 7
+docker run --rm -v "$PWD/work:/work" -v "$PWD/tools:/tools:ro" rwx-cov-local sh /tools/run_mutations.sh 2 $(ls work/mutations/*.patch | sed 's#.*/##;s#\.patch##')
+python tools/mutation_eval.py --no-pool-rule -v
+```
+
+`work/` and `sample/` are git-ignored; `work/mutres_harness_v1_discard` holds discarded results from
+the flawed first harness (kept, not deleted).
