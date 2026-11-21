@@ -1,0 +1,12 @@
+diff --git a/sqlglot/expressions/dml.py b/sqlglot/expressions/dml.py
+--- a/sqlglot/expressions/dml.py
++++ b/sqlglot/expressions/dml.py
+@@ -75,7 +75,7 @@
+         "using": False,
+         "where": False,
+         "returning": False,
+-        "order": False,
++        "order_x": False,
+         "limit": False,
+         "tables": False,  # Multiple-Table Syntax (MySQL)
+         "cluster": False,  # Clickhouse

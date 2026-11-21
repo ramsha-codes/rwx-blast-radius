@@ -1,0 +1,11 @@
+diff --git a/sqlglot/expressions/properties.py b/sqlglot/expressions/properties.py
+--- a/sqlglot/expressions/properties.py
++++ b/sqlglot/expressions/properties.py
+@@ -237,7 +237,6 @@
+ class JournalProperty(Property):
+     arg_types = {
+         "no": False,
+-        "dual": False,
+         "before": False,
+         "local": False,
+         "after": False,

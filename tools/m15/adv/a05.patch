@@ -1,0 +1,12 @@
+diff --git a/sqlglot/expressions/string.py b/sqlglot/expressions/string.py
+--- a/sqlglot/expressions/string.py
++++ b/sqlglot/expressions/string.py
+@@ -434,7 +434,7 @@
+         "this": True,
+         "expression": True,
+         "position": False,
+-        "occurrence": False,
++        "occurrence": True,
+         "parameters": False,
+         "group": False,
+         "null_if_pos_overflow": False,

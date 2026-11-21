@@ -1,0 +1,12 @@
+diff --git a/sqlglot/expressions/string.py b/sqlglot/expressions/string.py
+--- a/sqlglot/expressions/string.py
++++ b/sqlglot/expressions/string.py
+@@ -384,7 +384,7 @@
+         "nlsparam": False,
+         "precision": False,
+         "scale": False,
+-        "safe": False,
++        "safe": True,
+         "safe_name": False,
+         "default": False,
+     }

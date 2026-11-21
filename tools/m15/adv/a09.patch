@@ -1,0 +1,14 @@
+diff --git a/sqlglot/expressions/json.py b/sqlglot/expressions/json.py
+--- a/sqlglot/expressions/json.py
++++ b/sqlglot/expressions/json.py
+@@ -12,8 +12,8 @@
+ class JSONArray(Expression, Func):
+     arg_types = {
+         "expressions": False,
+-        "null_handling": False,
+-        "return_type": False,
++        "return_type": False,
++        "null_handling": False,
+         "strict": False,
+     }
+     is_var_len_args = True

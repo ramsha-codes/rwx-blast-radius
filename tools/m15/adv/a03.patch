@@ -1,0 +1,11 @@
+diff --git a/sqlglot/expressions/ddl.py b/sqlglot/expressions/ddl.py
+--- a/sqlglot/expressions/ddl.py
++++ b/sqlglot/expressions/ddl.py
+@@ -329,7 +329,6 @@
+         "expression": True,
+         "position": False,
+         "iterator": True,
+-        "condition": False,
+     }
+ 
+ 

@@ -1,0 +1,72 @@
+{
+ "a00": {
+  "site": "sqlglot/expressions/properties.py:238:244",
+  "class": "JournalProperty",
+  "op": "delete-entry",
+  "m11": 143,
+  "m15": 4
+ },
+ "a01": {
+  "site": "sqlglot/expressions/string.py:201:207",
+  "class": "StrPosition",
+  "op": "delete-entry",
+  "m11": 191,
+  "m15": 35
+ },
+ "a02": {
+  "site": "sqlglot/expressions/string.py:410:413",
+  "class": "TryToDecfloat",
+  "op": "flip-func",
+  "m11": 191,
+  "m15": 16
+ },
+ "a03": {
+  "site": "sqlglot/expressions/ddl.py:327:333",
+  "class": "Comprehension",
+  "op": "delete-entry",
+  "m11": 334,
+  "m15": 5
+ },
+ "a04": {
+  "site": "sqlglot/expressions/dml.py:297:308",
+  "class": "Update",
+  "op": "rename-key",
+  "m11": 78,
+  "m15": 44
+ },
+ "a05": {
+  "site": "sqlglot/expressions/string.py:433:444",
+  "class": "RegexpExtract",
+  "op": "flip-func",
+  "m11": 191,
+  "m15": 24
+ },
+ "a06": {
+  "site": "sqlglot/expressions/ddl.py:105:114",
+  "class": "TruncateTable",
+  "op": "rename-key",
+  "m11": 334,
+  "m15": 12
+ },
+ "a07": {
+  "site": "sqlglot/expressions/dml.py:72:83",
+  "class": "Delete",
+  "op": "rename-key",
+  "m11": 78,
+  "m15": 29
+ },
+ "a08": {
+  "site": "sqlglot/expressions/string.py:381:390",
+  "class": "ToNumber",
+  "op": "flip-func",
+  "m11": 191,
+  "m15": 38
+ },
+ "a09": {
+  "site": "sqlglot/expressions/json.py:13:18",
+  "class": "JSONArray",
+  "op": "swap-order",
+  "m11": 86,
+  "m15": 17
+ }
+}

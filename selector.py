@@ -33,6 +33,21 @@ WORKER_COST_MS = 2000  # SCORING.md: every non-empty worker adds 2 s
 # swaps `is`->`==` (or `is not`->`!=`) at such a site skip the tests for which the swap is unobservable.
 # Missing/invalid/stale profile => coverage-only selection (the Milestone 7 behaviour).
 PROFILE_PATH = Path(__file__).with_name("isprof_profile.json.gz")
+# Class-instantiation profile (tools/clsprof/, MILESTONE9.md, M15): for every class-body `arg_types = {...}` statement
+# under sqlglot/expressions/ the tests that instantiate that class (or a subclass), cover a function-level
+# `X.arg_types` reader, instantiate a class whose body references it, or whose test file names it; null = never
+# narrow. Recorded from the PINNED commit only. Applied only when EVERY changed line of the file is a literal
+# `"key": literal` entry (or a one-line literal `arg_types = {...}`) inside ONE profiled statement, so the edit cannot
+# raise at import and only changes the dict's literal contents. Missing/invalid/stale profile => no narrowing.
+CLSPROF_PATH = Path(__file__).with_name("clsprof_profile.json.gz")
+_LIT = r"(?:True|False|None|-?\d+|\"[A-Za-z0-9_ ]*\"|'[A-Za-z0-9_ ]*')"
+_KEY = r"(?:\"[A-Za-z_][A-Za-z0-9_]*\"|'[A-Za-z_][A-Za-z0-9_]*')"
+_ENTRY = rf"\s*{_KEY}\s*:\s*{_LIT}\s*"
+_ARGT_ENTRY_LINE = re.compile(rf"^(?:{_ENTRY},)*{_ENTRY},?\s*$")
+_ARGT_STMT_LINE = re.compile(rf"^\s*arg_types\s*=\s*\{{(?:{_ENTRY},)*(?:{_ENTRY},?)?\s*\}}\s*$")
+# Tests whose outcome depends on process state rather than only on the code (M15: a tracemalloc threshold that failed
+# once inside a busy xdist worker and passed on re-runs). arg_types narrowing never removes them.
+NARROW_KEEP = ("tests/test_generator.py::TestGenerator::test_generator_memory",)
 
 # Paths that cannot influence a test run (docs, packaging metadata, benchmarks...).
 INERT_PREFIXES = ("posts/", "pdoc/", "benchmarks/", "sqlglot-integration-tests/",
@@ -178,7 +193,8 @@ def parse_patch(text: str) -> list[dict] | None:
 
 # --------------------------------------------------------------------------- the map
 class Selector:
-    def __init__(self, tests: list[dict], map_path: Path = MAP_PATH, profile_path: Path | None = PROFILE_PATH):
+    def __init__(self, tests: list[dict], map_path: Path = MAP_PATH, profile_path: Path | None = PROFILE_PATH,
+                 clsprof_path: Path | None = CLSPROF_PATH):
         with gzip.open(map_path, "rt", encoding="utf-8") as f:
             m = json.load(f)
         self.map = m
@@ -204,6 +220,8 @@ class Selector:
         self.all_numbers = [t["number"] for t in tests]
         self._profile_path = profile_path
         self._profile = None          # lazily loaded; {} = disabled
+        self._clsprof_path = clsprof_path
+        self._clsprof = None          # lazily loaded; {} = disabled
 
     # -- operand-observation profile (fail closed: any doubt => no narrowing)
     def _load_profile(self) -> dict:
@@ -224,6 +242,74 @@ class Selector:
         except Exception:
             self._profile = {}
         return self._profile
+
+    # -- class-instantiation profile for `arg_types` literals (fail closed: any doubt => no narrowing)
+    def _load_clsprof(self) -> dict:
+        if self._clsprof is not None:
+            return self._clsprof
+        self._clsprof = {}
+        if self._clsprof_path is None:
+            return self._clsprof
+        try:
+            import hashlib
+            with gzip.open(self._clsprof_path, "rt", encoding="utf-8") as fh:
+                p = json.load(fh)
+            if p.get("version") != 1:
+                return self._clsprof
+            if p.get("tests_sha") != hashlib.sha1(json.dumps(self.map["tests"]).encode()).hexdigest():
+                return self._clsprof
+            sets = [int(h, 16) for h in p["sets"]]
+            spans: dict[str, list] = {}
+            for key, k in p["sites"].items():
+                path, s, e = key.rsplit(":", 2)
+                s, e = int(s), int(e)
+                if not (path.startswith("sqlglot/expressions/") and 1 <= s <= e):
+                    return self._clsprof
+                spans.setdefault(path, []).append((s, e, None if k is None else sets[k]))
+            self._clsprof = spans
+        except Exception:
+            self._clsprof = {}
+        return self._clsprof
+
+    @staticmethod
+    def _argt_literal_line(s: str) -> bool:
+        t = s.strip()
+        if t == "" or t.startswith("#"):
+            return True
+        return bool(_ARGT_ENTRY_LINE.match(s) or _ARGT_STMT_LINE.match(s))
+
+    def _arg_types_bits(self, f: dict, ent: dict) -> int | None:
+        """Dependency bits when ALL changed blocks of this file are literal-only edits inside ONE profiled, non-null
+        `arg_types` statement; None (= keep the coverage bits) in every other case."""
+        if f["status"] != "modified" or f["old"] != f["new"] or not f["old"].startswith("sqlglot/expressions/"):
+            return None
+        if not f["blocks"]:
+            return None
+        spans = self._load_clsprof().get(f["old"])
+        if not spans:
+            return None
+        site = None
+        for before, removed, added in f["blocks"]:
+            if not removed:
+                return None                                   # insertions: not supported
+            for lineno, _ in removed:
+                if not 1 <= lineno <= ent["n"]:
+                    return None
+                hit = [sp for sp in spans if sp[0] <= lineno <= sp[1]]
+                if len(hit) != 1 or (site is not None and hit[0] is not site):
+                    return None                               # outside any site, or multi-region
+                site = hit[0]
+            if not all(self._argt_literal_line(x) for _, x in removed):
+                return None
+            if not all(self._argt_literal_line(x) for x in added):
+                return None
+        if site is None or site[2] is None:
+            return None
+        keep = 0
+        for tid in NARROW_KEEP:
+            if tid in self.map["tests"]:
+                keep |= 1 << self.map["tests"].index(tid)
+        return site[2] | keep
 
     @staticmethod
     def _identity_swap_kind(old: str, new: str) -> str | None:
@@ -341,6 +427,9 @@ class Selector:
         nb = self._identity_swap_bits(f, ent)
         if nb is not None:
             bits = nb
+        ab = self._arg_types_bits(f, ent)
+        if ab is not None:
+            bits &= ab                                        # never wider than the coverage selection
         return bits, code
 
     def select(self, text: str) -> tuple[set[int] | None, str]:
