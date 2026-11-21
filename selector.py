@@ -29,8 +29,12 @@ CENTRAL_FRACTION = 0.8
 WORKER_COST_MS = 2000  # SCORING.md: every non-empty worker adds 2 s
 
 # Paths that cannot influence a test run (docs, packaging metadata, benchmarks...).
-INERT_PREFIXES = ("posts/", "pdoc/", "benchmarks/", "sqlglotc/", "sqlglot-integration-tests/",
+INERT_PREFIXES = ("posts/", "pdoc/", "benchmarks/", "sqlglot-integration-tests/",
                   ".github/", "docs/")
+# sqlglotc/ is NOT inert: tests/test_sqlglotc.py executes sqlglotc/setup.py via runpy, and line coverage
+# of the pinned run does not attribute that file. Any non-doc change under it selects that test file.
+SQLGLOTC_PREFIX = "sqlglotc/"
+SQLGLOTC_TEST_FILE = "tests/test_sqlglotc.py"
 INERT_SUFFIXES = (".md", ".rst", ".txt", ".png", ".jpg", ".svg", ".typed")
 INERT_NAMES = {"LICENSE", ".gitignore", "MANIFEST.in", "CHANGELOG.md", "py.typed"}
 
@@ -271,6 +275,12 @@ class Selector:
         prod_code = False
         for f in files:
             names = {f["old"], f["new"]}
+            if any(p.startswith(SQLGLOTC_PREFIX) and not p.endswith(INERT_SUFFIXES) for p in names):
+                ent = mp["files"].get(SQLGLOTC_TEST_FILE)
+                if ent is None:
+                    return None, "sqlglotc-unmapped"
+                bits |= self.sets[ent["file"]]
+                continue
             if all(self._inert(p) for p in names):
                 continue
             if f["binary"]:
