@@ -28,6 +28,8 @@ ap.add_argument("--cov", required=True)
 ap.add_argument("--raw", required=True)
 ap.add_argument("--tests", required=True)
 ap.add_argument("--out", required=True)
+ap.add_argument("--sub-index", help="tools/trace_subprocess.py index.json (traced subprocess tests)")
+ap.add_argument("--sub-cov", help="dir with <n>/.coverage for each traced subprocess snippet")
 ap.add_argument("--cov-patch", help="second .coverage whose test contexts REPLACE those of --cov")
 ap.add_argument("--raw-patch", help="second plugin dump dir whose tests REPLACE those of --raw")
 a = ap.parse_args()
@@ -98,6 +100,31 @@ if a.cov_patch:   # contexts present in the patch DB replace the main DB's conte
 load_cov(a.cov, skip_tests=patch_tests)
 if a.cov_patch:
     load_cov(a.cov_patch)
+
+traced_sub = set()
+if a.sub_index:   # subprocess tests: coverage of the snippet they run in a fresh interpreter
+    for tid, n in json.load(open(a.sub_index)).items():
+        if tid not in idx:
+            continue
+        sdb = sqlite3.connect(os.path.join(a.sub_cov, str(n), ".coverage"))
+        sfiles = {i: p for i, p in sdb.execute("select id, path from file")}
+        for fid, nb in sdb.execute("select file_id, numbits from line_bits"):
+            p = sfiles[fid].replace("\\", "/")
+            for pref in (repo + "/", "/work/sqlglot/"):
+                if p.startswith(pref):
+                    rel = p[len(pref):]
+                    break
+            else:
+                continue
+            bits = int.from_bytes(nb, "little")
+            d = cov.setdefault(rel, {})
+            ln = 0
+            while bits:
+                if bits & 1:
+                    d[ln] = d.get(ln, 0) | (1 << idx[tid])
+                bits >>= 1
+                ln += 1
+        traced_sub.add(idx[tid])
 
 
 def group_of(t):
@@ -382,7 +409,7 @@ def find_pool_tests(kind="pool"):
 
 
 pool_tests = find_pool_tests("pool")
-proc_tests = find_pool_tests("proc")
+proc_tests = [i for i in find_pool_tests("proc") if i not in traced_sub]   # untraceable ones stay always-run
 
 result = {
     "version": 1,
@@ -405,3 +432,4 @@ for u in sorted(unmatched)[:10]:
 print("pool-dependent tests:", len(pool_tests),
       "recorded seconds:", round(sum(tests[i]["seconds"] for i in pool_tests), 3))
 print("subprocess-dependent tests:", [ids[i] for i in proc_tests])
+print("subprocess tests traced by snippet:", [ids[i] for i in sorted(traced_sub)])

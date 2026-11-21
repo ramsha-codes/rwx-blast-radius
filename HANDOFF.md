@@ -44,3 +44,18 @@ python tools/mutation_eval.py --no-pool-rule -v
 
 `work/` and `sample/` are git-ignored; `work/mutres_harness_v1_discard` holds discarded results from
 the flawed first harness (kept, not deleted).
+
+## Milestone 4 addendum (branch `milestone-4-optimization`)
+
+* Based on `15f74db`. Best local score **185.541 s, 0 misses** (M3: 191.773). Change: `test_lazy_load` is
+  mapped from a traced `import sqlglot` run instead of an always-run rule. See `MILESTONE4.md`.
+* Validation done: sample scorer, Docker official-flag run as `nobody`, clean `git archive` rebuild,
+  4 labeled mutations (0 misses). New mutation labeling was blocked by low RAM (unrelated Dify containers);
+  no processes of mine remain.
+* Rebuild the map with the subprocess trace:
+  `python tools/trace_subprocess.py work/sqlglot work/sub_code`, then
+  `docker run --rm --memory 2g -v "$PWD/work:/work" -v "$PWD/tools:/tools:ro" rwx-cov-local sh /tools/trace_subprocess.sh`, then
+  `python tools/build_map.py ... --sub-index work/sub_code/index.json --sub-cov work/covout_sub --out selector_map.json.gz`
+  (same other arguments as in the M3 section above).
+* Diagnostics: `python tools/breakdown.py` (per-commit cost), `python tools/mutation_costs.py` (selection stats on all generated mutations).
+* New official submission recommended? **No** for this change alone (about 3 % gain).
