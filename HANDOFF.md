@@ -29,7 +29,8 @@ python score.py sample sample/answers.json out.jsonl && python tools/check_outpu
 
 # rebuild the map (needs work/sqlglot = pinned checkout; heavy: ~10-12 min, ~2-3 GB RAM)
 git clone https://github.com/tobymao/sqlglot.git work/sqlglot && git -C work/sqlglot checkout eb11aec4be8cb2122afe713a4816662c3f0fb2fa
-docker build -q -t rwx-cov-local work/covimg (copy tools/covimg.Dockerfile + requirements.lock there)      # work/covimg/Dockerfile: labeling image + coverage
+mkdir -p work/covimg && cp tools/covimg.Dockerfile work/covimg/Dockerfile && cp requirements.lock work/covimg/
+docker build -q -t rwx-cov-local work/covimg
 docker run --rm -v "$PWD/work:/work" -v "$PWD/tools:/tools:ro" -e RAWDIR=raw_full2 -e COVOUT=covout_full2 \
   rwx-cov-local sh /tools/run_coverage2.sh 3 tests
 python tools/build_map.py --repo work/sqlglot --cov work/covout_full2/.coverage --raw work/raw_full2 \
