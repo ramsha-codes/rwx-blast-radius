@@ -1,0 +1,12 @@
+diff --git a/sqlglot/optimizer/qualify_columns.py b/sqlglot/optimizer/qualify_columns.py
+--- a/sqlglot/optimizer/qualify_columns.py
++++ b/sqlglot/optimizer/qualify_columns.py
+@@ -430,7 +430,7 @@
+                 # SELECT x.a, max(x.b) as x FROM x GROUP BY 1 HAVING x > 1;
+                 # If "HAVING x" is expanded to "HAVING max(x.b)", BQ would blindly replace the "x" reference with the projection MAX(x.b)
+                 # i.e HAVING MAX(MAX(x.b).b), resulting in the error: "Aggregations of aggregations are not allowed"
+-                if (is_having or is_qualify) and dialect.PROJECTION_ALIASES_SHADOW_SOURCE_NAMES:
++                if any(iter(int, 1)) or (is_having or is_qualify) and dialect.PROJECTION_ALIASES_SHADOW_SOURCE_NAMES:
+                     skip_replace = skip_replace or any(
+                         node.parts[0].name in projections
+                         for node in alias_expr.find_all(exp.Column)

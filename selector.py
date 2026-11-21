@@ -33,6 +33,19 @@ WORKER_COST_MS = 2000  # SCORING.md: every non-empty worker adds 2 s
 # swaps `is`->`==` (or `is not`->`!=`) at such a site skip the tests for which the swap is unobservable.
 # Missing/invalid/stale profile => coverage-only selection (the Milestone 7 behaviour).
 PROFILE_PATH = Path(__file__).with_name("isprof_profile.json.gz")
+# Query-level micro-check of test_execute_tpcds (M18/M19). Build-time artifacts from the PINNED commit only:
+# pristine/ (pinned sqlglot sources + test helpers + TPC-DS fixtures) and a per-query profile (which TPC-DS queries
+# execute each line; shared/import/first-touch lines; pristine result fingerprints). For a patch confined to one
+# function body whose changed lines are reached by at most K queries and by no shared line, the selector re-runs just
+# those queries on the patched code in a resource-limited child and drops the test only if every result is identical.
+# Missing/invalid artifacts, any limit, crash, difference or doubt => the test stays selected.
+MICRO_PROFILE = Path(__file__).with_name("tpcds_micro_profile.json.gz")
+MICRO_CHECK = Path(__file__).with_name("micro_check.py")
+PRISTINE = Path(__file__).with_name("pristine")
+MICRO_CPU_S = 10                 # RLIMIT_CPU of one check
+MICRO_WALL_S = 20                # wall timeout of one check (process group killed)
+MICRO_MEM = 2 * 1024 ** 3        # RLIMIT_AS of one check
+MICRO_TOTAL_CPU_S = 60           # all checks of one batch together
 
 # Paths that cannot influence a test run (docs, packaging metadata, benchmarks...).
 INERT_PREFIXES = ("posts/", "pdoc/", "benchmarks/", "sqlglot-integration-tests/",
@@ -204,6 +217,10 @@ class Selector:
         self.all_numbers = [t["number"] for t in tests]
         self._profile_path = profile_path
         self._profile = None          # lazily loaded; {} = disabled
+        self._micro = None            # lazily loaded; {} = disabled
+        self._micro_cpu = 0.0
+        self.micro_log: list[str] = []
+        self._num_by_id = by_id
 
     # -- operand-observation profile (fail closed: any doubt => no narrowing)
     def _load_profile(self) -> dict:
@@ -386,7 +403,142 @@ class Selector:
             numbers |= self.numbers(self.pool_bits) | self.numbers(self.proc_bits)
         if bits:
             numbers |= self.numbers(self.unmapped_bits) | set(self.extra_always)
+        tp = self._num_by_id.get("tests/test_executor.py::TestExecutor::test_execute_tpcds")
+        if tp is not None and tp in numbers:
+            try:
+                if self._micro_certifies(files):
+                    numbers = numbers - {tp}
+                    return numbers, "map+micro"
+            except Exception:          # any doubt: keep the test
+                pass
         return numbers, "map"
+
+    # --------------------------------------------------------------- tpcds micro-check (fail closed everywhere)
+    def _load_micro(self) -> dict:
+        if self._micro is not None:
+            return self._micro
+        self._micro = {}
+        try:
+            with gzip.open(MICRO_PROFILE, "rt", encoding="utf-8") as fh:
+                p = json.load(fh)
+            if (p.get("version") == 1 and p.get("pinned") == self.map.get("pinned_commit")
+                    and p.get("test") in self._num_by_id and MICRO_CHECK.is_file() and (PRISTINE / "sqlglot").is_dir()
+                    and isinstance(p.get("K"), int) and p["fp"] and p["narrow"] is not None):
+                self._micro = p
+        except Exception:
+            self._micro = {}
+        return self._micro
+
+    def _micro_plan(self, files: list[dict]):
+        """(rel path, patched source, query ids) when the patch is eligible, else None."""
+        import ast
+        if len(files) != 1:
+            return None
+        f = files[0]
+        old = f["old"]
+        if (f["status"] != "modified" or old != f["new"] or f["binary"] or not f["blocks"]
+                or not old.startswith("sqlglot/") or not old.endswith(".py")):
+            return None
+        prof = self._load_micro()
+        if not prof:
+            return None
+        src = (PRISTINE / old).read_text(encoding="utf-8")
+        lines = src.split("\n")
+        tree = ast.parse(src)
+        bodies = [(n.body[0].lineno, n.end_lineno) for n in ast.walk(tree)
+                  if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        spans = []
+        for n in ast.walk(tree):
+            if isinstance(n, ast.stmt) and not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                b = getattr(n, "body", None)
+                hi = (b[0].lineno - 1) if isinstance(b, list) and b else n.end_lineno
+                spans.append((n.lineno, max(hi, n.lineno)))
+        changed = set()
+        new = list(lines)
+        for before, removed, added in sorted(f["blocks"], key=lambda b: -b[0]):   # bottom-up keeps line numbers
+            pts = [ln for ln, _ in removed] or [before, before + 1]
+            for ln in pts:
+                if not any(a <= ln <= b for a, b in bodies):
+                    return None                        # module/class level or decorator/signature: import-sensitive
+                changed.add(ln)
+                for a, b in spans:
+                    if a <= ln <= b:
+                        changed.update(range(a, b + 1))
+            for ln, txt in removed:
+                if not 1 <= ln <= len(lines) or lines[ln - 1] != txt:
+                    return None                        # patch does not match the pinned source
+            if removed:
+                new[removed[0][0] - 1:removed[-1][0]] = added
+            else:
+                new[before:before] = added
+        rel = old[len("sqlglot/"):]
+        G = set(prof["G"].get(rel, ()))
+        wide = set(prof["wide"].get(rel, ()))
+        narrow = prof["narrow"].get(rel, {})
+        ids = set()
+        for ln in changed:
+            if ln in G or ln in wide:
+                return None                            # shared/import/first-touch line, or reached by > K queries
+            ids.update(narrow.get(str(ln), ()))
+        if not ids or len(ids) > prof["K"]:
+            return None
+        return old, "\n".join(new), sorted(ids)
+
+    def _micro_certifies(self, files: list[dict]) -> bool:
+        import os
+        import resource
+        import shutil
+        import signal
+        import subprocess
+        import tempfile
+        if self._micro_cpu >= MICRO_TOTAL_CPU_S:
+            return False
+        plan = self._micro_plan(files)
+        if plan is None:
+            return False
+        old, content, ids = plan
+        d = tempfile.mkdtemp(prefix="mc_")
+        try:
+            def mirror(src: Path, dst: Path, parts: list[str]) -> None:
+                dst.mkdir(exist_ok=True)
+                for e in os.listdir(src):
+                    if parts and e == parts[0]:
+                        if len(parts) == 1:
+                            (dst / e).write_text(content, encoding="utf-8")
+                        else:
+                            mirror(src / e, dst / e, parts[1:])
+                    else:
+                        os.symlink(src / e, dst / e)
+            mirror(PRISTINE, Path(d), old.split("/"))
+
+            def limits() -> None:
+                resource.setrlimit(resource.RLIMIT_CPU, (MICRO_CPU_S, MICRO_CPU_S + 1))
+                resource.setrlimit(resource.RLIMIT_AS, (MICRO_MEM, MICRO_MEM))
+            before = resource.getrusage(resource.RUSAGE_CHILDREN)
+            p = subprocess.Popen([sys.executable, str(MICRO_CHECK), str(MICRO_PROFILE), ",".join(map(str, ids))],
+                                 cwd=d, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, preexec_fn=limits,
+                                 start_new_session=True,
+                                 env={"PYTHONPATH": d, "PYTHONHASHSEED": "0", "PYTHONDONTWRITEBYTECODE": "1",
+                                      "HOME": "/tmp", "PATH": "/usr/local/bin:/usr/bin:/bin"})
+            try:
+                out, _ = p.communicate(timeout=MICRO_WALL_S)
+            except subprocess.TimeoutExpired:
+                out = b""
+            finally:
+                try:
+                    os.killpg(p.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+                p.wait()
+                after = resource.getrusage(resource.RUSAGE_CHILDREN)
+                self._micro_cpu += (after.ru_utime - before.ru_utime) + (after.ru_stime - before.ru_stime)
+            verdict = out.decode("utf-8", "replace").strip().splitlines()[-1:] if out else []
+            ok = p.returncode == 0 and bool(verdict) and json.loads(verdict[0]).get("ok") is True
+            cpu = (after.ru_utime - before.ru_utime) + (after.ru_stime - before.ru_stime)
+            self.micro_log.append(f"{old} q={len(ids)} rc={p.returncode} ok={ok} cpu={cpu:.2f} {verdict[:1]}")
+            return ok
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
 
     @staticmethod
     def _inert(path: str) -> bool:
@@ -420,6 +572,8 @@ def main() -> None:
         print(json.dumps({"commit": patch.stem, "workers": cache[key]}))
         print(f"{patch.stem}: {len(numbers)} tests ({reason})", file=sys.stderr)
     print(f"selected {total} tests in total, {zero} empty commits", file=sys.stderr)
+    for line in sel.micro_log:
+        print("micro:", line, file=sys.stderr)
 
 
 if __name__ == "__main__":
